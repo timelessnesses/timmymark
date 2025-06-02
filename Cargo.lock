@@ -412,7 +412,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "twodime"
+name = "timmymark"
 version = "0.1.0"
 dependencies = [
  "better-panic",
