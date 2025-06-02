@@ -1,0 +1,32 @@
+[package]
+name = "twodime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+better-panic = "0.3.0"
+rand = "0.9.1"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+sdl2 = { version = "0.37.0", features = ["static-link", "use-vcpkg","ttf", "image"] }
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+sdl2 = { version = "0.37.0", features = ["static-link", "use-pkgconfig","ttf", "image"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+clap = { version = "4.5.39", features = ["derive"] }
+
+[package.metadata.vcpkg]
+dependencies = ["sdl2", "sdl2-ttf", "sdl2-image[libjpeg-turbo,tiff,libwebp,avif]"]
+git = "https://github.com/microsoft/vcpkg"
+rev = "2025.04.09"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+sdl2 = { version = "0.37.0", features = ["ttf", "bundled", "image"] }
+wasm-bindgen = "0.2.89"
+
+[package.metadata.vcpkg.target]
+x86_64-pc-windows-msvc = { triplet = "x64-windows-static-md" }
+
+[profile.release]
+opt-level = 3
