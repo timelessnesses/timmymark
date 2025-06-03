@@ -7,23 +7,24 @@ edition = "2024"
 better-panic = "0.3.0"
 parking_lot = "0.12.4"
 rand = "0.9.1"
+sdl3-sys = "0.5.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-sdl2 = { version = "0.37.0", features = ["static-link", "use-vcpkg","ttf", "image"] }
+sdl3 = { version = "0.14.28", features = ["build-from-source-static", "use-vcpkg","ttf", "image"] }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
-sdl2 = { version = "0.37.0", features = ["static-link", "use-pkgconfig","ttf", "image"] }
+sdl3 = { version = "0.14.28", features = ["static-link", "use-pkg-config","ttf", "image"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clap = { version = "4.5.39", features = ["derive"] }
 
 [package.metadata.vcpkg]
-dependencies = ["sdl2", "sdl2-ttf", "sdl2-image[libjpeg-turbo,tiff,libwebp,avif]"]
+dependencies = ["sdl3", "sdl3-ttf", "sdl3-image[jpeg,tiff,webp, png]"]
 git = "https://github.com/microsoft/vcpkg"
 rev = "2025.04.09"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-sdl2 = { version = "0.37.0", features = ["ttf", "bundled", "image"] }
+sdl3 = { version = "0.14.28", features = ["ttf", "build-from-source-static", "image"] }
 wasm-bindgen = "0.2.89"
 
 [package.metadata.vcpkg.target]

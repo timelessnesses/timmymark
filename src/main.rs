@@ -1,12 +1,20 @@
-use std::sync::{Arc, atomic::AtomicBool};
+use std::{
+    ffi::CString,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 use clap::Parser;
-use sdl2::{self, image::LoadTexture};
+use sdl3::{
+    self,
+    image::LoadTexture,
+    render::{FPoint, Vertex},
+};
 
+#[allow(dead_code)]
 mod ffmpeg;
 
 #[derive(clap::Parser)]
-#[command(author = "timelessnesses", about = "SDL2 (Rust) Bunnymark")]
+#[command(author = "timelessnesses", about = "sdl3 (Rust) Bunnymark")]
 pub struct Cli {
     /// List GPU renderers (for the SELECTED_GPU_RENDERER arg)
     #[arg(short, long)]
@@ -32,11 +40,11 @@ pub struct Cli {
     #[arg(long)]
     pub texture_folder: Option<std::path::PathBuf>,
 
-    /// Texture width, the aspect ratio will be respected, if this value was set, texture_height will be ignored (default: 128)
-    #[arg(long, default_value_t = 64, conflicts_with = "texture_height")]
+    /// Texture width, the aspect ratio will be respected, if this value was set, texture_height will be ignored (default: 32)
+    #[arg(long, default_value_t = 32, conflicts_with = "texture_height")]
     pub texture_width: u32,
 
-    /// Texture height, the aspect ratio will be respected if this value was set, texture_width will be ignored (default: 128)
+    /// Texture height, the aspect ratio will be respected if this value was set, texture_width will be ignored
     #[arg(long, default_value_t = 0, conflicts_with = "texture_width")]
     pub texture_height: u32,
 
@@ -54,6 +62,10 @@ pub struct Cli {
 
     #[arg(long, default_value_t = false)]
     pub record: bool,
+
+    /// Draw textures as geometry instead of copying textures (support only one texture)
+    #[arg(long, default_value_t = false)]
+    draw_as_geometry: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -146,10 +158,12 @@ impl Simulator {
     }
 }
 
-const DEFAULT_TEXTURE: &[u8] = include_bytes!("../dumb_idiot.png");
+const DEFAULT_TEXTURE: &[u8] = include_bytes!("../wabbit_alpha.png");
 
 const ROBOTO: &[u8] = include_bytes!("./assets/Roboto-Light.ttf");
 
+#[allow(dead_code)]
+/// soon™️
 const TARGET_VIDEO_FRAMERATE: u32 = 60;
 
 fn main() {
@@ -160,8 +174,8 @@ fn main() {
     let cli = Cli::parse();
     if cli.list_gpu_renderers {
         println!("Available GPU renderers:");
-        sdl2::render::drivers().enumerate().for_each(|(i, r)| {
-            let mut flags = vec![];
+        sdl3::render::drivers().enumerate().for_each(|(i, r)| {
+            /* let mut flags = vec![];
             if r.flags & 0x00000001 != 0 {
                 flags.push("Software Fallback");
             }
@@ -178,21 +192,21 @@ fn main() {
             println!("  Texture Formats Supported: {:?}", r.texture_formats);
             println!("  Max Texture Width: {}", r.max_texture_width);
             println!("  Max Texture Height: {}", r.max_texture_height);
-            println!("  Rendering Capability: {}", flags.join(", "));
+            println!("  Rendering Capability: {}", flags.join(", ")); */
+            println!("{}: Renderer: {}", i + 1, r);
             println!();
         });
-        return
+        return;
     }
 
-    let ctx = sdl2::init().unwrap();
+    let ctx = sdl3::init().unwrap();
     let video = ctx.video().unwrap();
-    let _image = sdl2::image::init(sdl2::image::InitFlag::all()).unwrap();
-    let font_ctx = sdl2::ttf::init().unwrap();
+    let font_ctx = sdl3::ttf::init().unwrap();
 
-    let mut ffmpeg = None;
+    /* let mut ffmpeg = None;
     if cli.record {
         ffmpeg = Some(ffmpeg::VideoRecorder::new("out.mp4", cli.width, cli.height, TARGET_VIDEO_FRAMERATE));
-    }
+    } */
 
     let window = video
         .window(
@@ -203,16 +217,21 @@ fn main() {
         .position_centered()
         .build()
         .unwrap();
-
-    let mut canvas = window.into_canvas().accelerated();
+    let mut canvas;
     if let Some(renderer) = cli.selected_gpu_renderer {
-        canvas = canvas.index(renderer - 1);
+        let renderer_string =
+            sdl3::render::drivers().collect::<Vec<String>>()[renderer as usize - 1].clone();
+        canvas = sdl3::render::create_renderer(
+            window,
+            Some(CString::new(renderer_string).unwrap().as_c_str()),
+        )
+        .unwrap();
+    } else {
+        canvas = sdl3::render::create_renderer(window, None).unwrap();
     }
-
-    let mut canvas = canvas.build().unwrap();
     let mut event_pump = ctx.event_pump().unwrap();
 
-    let sdl2_supported_texture_formats = ["JPG", "PNG", "WEBP", "TIF"];
+    let sdl3_supported_texture_formats = ["JPG", "PNG", "WEBP", "TIF"];
 
     let texture_creator = canvas.texture_creator();
     let mut textures = Vec::new();
@@ -223,8 +242,8 @@ fn main() {
             let path = file.path();
             if path.is_file() {
                 let ext = path.extension().unwrap().to_str().unwrap();
-                if sdl2_supported_texture_formats.contains(&ext) {
-                    let texture: sdl2::render::Texture<'_> =
+                if sdl3_supported_texture_formats.contains(&ext) {
+                    let texture: sdl3::render::Texture<'_> =
                         texture_creator.load_texture(path).unwrap();
                     let queried = texture.query();
                     if cli.texture_width != 0 {
@@ -295,14 +314,14 @@ fn main() {
     let max_x = cli.width as f32 - textures[0].1.0;
     let max_y = cli.height as f32 - textures[0].1.1;
 
-    let simulator = Arc::new(parking_lot::Mutex::new(Simulator::new(max_x, max_y)));
+    let simulator = Arc::new(parking_lot::RwLock::new(Simulator::new(max_x, max_y)));
 
     let fps_font = font_ctx
-        .load_font_from_rwops(sdl2::rwops::RWops::from_bytes(ROBOTO).unwrap(), 13)
+        .load_font_from_iostream(sdl3::iostream::IOStream::from_bytes(ROBOTO).unwrap(), 13.0)
         .unwrap();
 
     let exit_flag = Arc::new(AtomicBool::new(false));
-
+    let (timer_sender, timer_receiver) = std::sync::mpsc::channel();
     spawn_thingy_spawner(
         simulator.clone(),
         exit_flag.clone(),
@@ -310,6 +329,7 @@ fn main() {
         textures.len(),
         cli.texture_limit,
         cli.spawn_by_click,
+        timer_sender,
     );
 
     #[cfg(debug_assertions)]
@@ -317,23 +337,33 @@ fn main() {
     #[cfg(debug_assertions)]
     let mut current_mouse_y = 0.0;
 
+    let mut last_physics_timer = std::time::Duration::new(0, 0);
+
+    let mut vertexes = Vec::with_capacity((4 * cli.texture_limit) as usize);
+    let mut indices = Vec::with_capacity((6 * cli.texture_limit) as usize);
+
+    for i in 0..cli.texture_limit {
+        let base = (i * 4) as u16;
+                indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base + 1]);
+    }
+
     'main_loop: loop {
         let frame_time = std::time::Instant::now();
         for event in event_pump.poll_iter() {
             match event {
-                sdl2::event::Event::Quit { .. } => {
+                sdl3::event::Event::Quit { .. } => {
                     exit_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                     break 'main_loop;
                 }
                 #[cfg(debug_assertions)]
-                sdl2::event::Event::MouseMotion { x, y, .. } => {
+                sdl3::event::Event::MouseMotion { x, y, .. } => {
                     current_mouse_x = x as f32;
                     current_mouse_y = y as f32;
                 }
-                sdl2::event::Event::MouseButtonDown {
+                sdl3::event::Event::MouseButtonDown {
                     mouse_btn, x, y, ..
                 } => {
-                    let spawn_amount = if mouse_btn == sdl2::mouse::MouseButton::Left {
+                    let spawn_amount = if mouse_btn == sdl3::mouse::MouseButton::Left {
                         cli.mouse_click_spawn_amount.0
                     } else {
                         cli.mouse_click_spawn_amount.1
@@ -348,52 +378,108 @@ fn main() {
                         } else {
                             0
                         };
-                        simulator.lock().add_thing(random_velocity(), pos, i);
+                        {
+                            simulator.write().add_thing(random_velocity(), pos, i);
+                        }
                     }
                 }
                 _ => {}
             }
         }
+        let mut render_time = std::time::Instant::now();
         canvas.clear();
-        for thing in simulator.lock().things.iter() {
-            let texture = &textures[thing.texture_index];
-            let (texture_width, texture_height) = texture.1;
-            let (texture_x, texture_y) = thing.position;
-            let x = texture_x;
-            let y = texture_y;
-            canvas
-                .copy(
-                    &texture.0,
-                    None,
-                    Some(sdl2::rect::Rect::new(
-                        x as i32,
-                        y as i32,
-                        texture_width as u32,
-                        texture_height as u32,
-                    )),
-                )
-                .unwrap();
+
+        let mut geometry_time = None;
+        if cli.draw_as_geometry {
+            let geo_time = std::time::Instant::now();
+            for (i, thing) in simulator.read().things.iter().enumerate() {
+                let texture = &textures[thing.texture_index];
+                let (texture_width, texture_height) = texture.1;
+                let (texture_x, texture_y) = thing.position;
+                let x = texture_x;
+                let y = texture_y;
+                vertexes.extend_from_slice(&[
+                    Vertex {
+                        color: sdl3::pixels::Color::WHITE.into(),
+                        position: FPoint::new(x, y),
+                        tex_coord: FPoint::new(0.0, 0.0),
+                    },
+                    Vertex {
+                        color: sdl3::pixels::Color::WHITE.into(),
+                        position: FPoint::new(x + texture_width, y),
+                        tex_coord: FPoint::new(1.0, 0.0),
+                    },
+                    Vertex {
+                        color: sdl3::pixels::Color::WHITE.into(),
+                        position: FPoint::new(x, y + texture_height),
+                        tex_coord: FPoint::new(0.0, 1.0),
+                    },
+                    Vertex {
+                        color: sdl3::pixels::Color::WHITE.into(),
+                        position: FPoint::new(x + texture_width, y + texture_height),
+                        tex_coord: FPoint::new(1.0, 1.0),
+                    },
+                ]);
+            }
+            geometry_time = Some(geo_time.elapsed());
+            render_time = std::time::Instant::now();
+            canvas.render_geometry(&vertexes, Some(&textures[0].0), &indices[..(vertexes.len() / 4) * 6]).unwrap();
+            
+        } else {
+            for thing in simulator.read().things.iter() {
+                let texture = &textures[thing.texture_index];
+                let (texture_width, texture_height) = texture.1;
+                let (texture_x, texture_y) = thing.position;
+                let x = texture_x;
+                let y = texture_y;
+
+                canvas
+                    .copy(
+                        &texture.0,
+                        None,
+                        sdl3::render::FRect::new(x, y, texture_width, texture_height),
+                    )
+                    .unwrap();
+            }
+        }
+        let render_time = render_time.elapsed();
+
+        if let Ok(t) = timer_receiver.try_recv() {
+            last_physics_timer = t
         }
 
         let fps_text = fps_font
             .render(&format!("FPS: {}", truncate(fps, 2)))
-            .shaded(sdl2::pixels::Color::WHITE, sdl2::pixels::Color::BLACK)
+            .shaded(sdl3::pixels::Color::WHITE, sdl3::pixels::Color::BLACK)
             .unwrap();
         let mf_text = fps_font
             .render(&format!("Maximum FPS: {}", truncate(mf, 2)))
-            .shaded(sdl2::pixels::Color::WHITE, sdl2::pixels::Color::BLACK)
+            .shaded(sdl3::pixels::Color::WHITE, sdl3::pixels::Color::BLACK)
             .unwrap();
         let lfp_text = fps_font
             .render(&format!("Minimum FPS: {}", truncate(lf, 2)))
-            .shaded(sdl2::pixels::Color::WHITE, sdl2::pixels::Color::BLACK)
+            .shaded(sdl3::pixels::Color::WHITE, sdl3::pixels::Color::BLACK)
             .unwrap();
         let added_render_latency_text = fps_font
-            .render(&number(frame_time.elapsed()))
-            .shaded(sdl2::pixels::Color::WHITE, sdl2::pixels::Color::BLACK)
+            .render(&("Frame Time: ".to_string() + &number(frame_time.elapsed())))
+            .shaded(sdl3::pixels::Color::WHITE, sdl3::pixels::Color::BLACK)
             .unwrap();
         let thingy_count = fps_font
-            .render(&format!("Thingy Count: {}", simulator.lock().things.len()))
-            .shaded(sdl2::pixels::Color::WHITE, sdl2::pixels::Color::BLACK)
+            .render(&format!("Thingy Count: {}", simulator.read().things.len()))
+            .shaded(sdl3::pixels::Color::WHITE, sdl3::pixels::Color::BLACK)
+            .unwrap();
+        let frame_time_breakdown = fps_font
+            .render(&format!(
+                "Frame Time Breakdown: Physics {} + Geometry {} + Rendering {}",
+                number(last_physics_timer),
+                if let Some(t) = geometry_time {
+                    number(t)
+                } else {
+                    "N/A".to_string()
+                },
+                number(render_time)
+            ))
+            .shaded(sdl3::pixels::Color::WHITE, sdl3::pixels::Color::BLACK)
             .unwrap();
         canvas
             .copy(
@@ -401,11 +487,11 @@ fn main() {
                     .create_texture_from_surface(&fps_text)
                     .unwrap(),
                 None,
-                sdl2::rect::Rect::new(
-                    (canvas.output_size().unwrap().0 - fps_text.width()) as i32,
-                    0,
-                    fps_text.width(),
-                    fps_text.height(),
+                sdl3::render::FRect::new(
+                    (canvas.output_size().unwrap().0 - fps_text.width()) as f32,
+                    0.0,
+                    fps_text.width() as f32,
+                    fps_text.height() as f32,
                 ),
             )
             .unwrap();
@@ -415,7 +501,7 @@ fn main() {
                     .create_texture_from_surface(&mf_text)
                     .unwrap(),
                 None,
-                sdl2::rect::Rect::new(
+                sdl3::rect::Rect::new(
                     (canvas.output_size().unwrap().0 - mf_text.width()) as i32,
                     fps_text.height() as i32 + 10,
                     mf_text.width(),
@@ -429,7 +515,7 @@ fn main() {
                     .create_texture_from_surface(&lfp_text)
                     .unwrap(),
                 None,
-                sdl2::rect::Rect::new(
+                sdl3::rect::Rect::new(
                     (canvas.output_size().unwrap().0 - lfp_text.width()) as i32,
                     mf_text.height() as i32 + fps_text.height() as i32 + 20,
                     lfp_text.width(),
@@ -444,7 +530,7 @@ fn main() {
                     .create_texture_from_surface(&added_render_latency_text)
                     .unwrap(),
                 None,
-                sdl2::rect::Rect::new(
+                sdl3::rect::Rect::new(
                     (canvas.output_size().unwrap().0 - added_render_latency_text.width()) as i32,
                     (fps_text.height() + mf_text.height() + lfp_text.height() + 30) as i32,
                     added_render_latency_text.width(),
@@ -458,7 +544,7 @@ fn main() {
                     .create_texture_from_surface(&thingy_count)
                     .unwrap(),
                 None,
-                sdl2::rect::Rect::new(
+                sdl3::rect::Rect::new(
                     (canvas.output_size().unwrap().0 - thingy_count.width()) as i32,
                     (fps_text.height()
                         + mf_text.height()
@@ -470,18 +556,37 @@ fn main() {
                 ),
             )
             .unwrap();
+        canvas
+            .copy(
+                &texture_creator
+                    .create_texture_from_surface(&frame_time_breakdown)
+                    .unwrap(),
+                None,
+                sdl3::rect::Rect::new(
+                    (canvas.output_size().unwrap().0 - frame_time_breakdown.width()) as i32,
+                    (fps_text.height()
+                        + mf_text.height()
+                        + lfp_text.height()
+                        + 50
+                        + thingy_count.height()
+                        + frame_time_breakdown.height()) as i32,
+                    frame_time_breakdown.width(),
+                    frame_time_breakdown.height(),
+                ),
+            )
+            .unwrap();
         #[cfg(debug_assertions)]
         {
-            canvas.set_draw_color(sdl2::pixels::Color::CYAN);
+            canvas.set_draw_color(sdl3::pixels::Color::CYAN);
             canvas
-                .fill_rect(sdl2::rect::Rect::new(
+                .fill_rect(sdl3::rect::Rect::new(
                     current_mouse_x as i32,
                     current_mouse_y as i32,
                     100,
                     100,
                 ))
                 .unwrap();
-            canvas.set_draw_color(sdl2::pixels::Color::BLACK);
+            canvas.set_draw_color(sdl3::pixels::Color::BLACK);
         }
         canvas.present();
         fc += 1;
@@ -502,23 +607,25 @@ fn main() {
             lpf = fps;
             lft = std::time::Instant::now();
         }
+        vertexes.clear();
     }
 }
 
 fn spawn_thingy_spawner(
-    simulator: Arc<parking_lot::Mutex<Simulator>>,
+    simulator: Arc<parking_lot::RwLock<Simulator>>,
     exit_flag: Arc<AtomicBool>,
     spawn_time: f32,
     texture_counts: usize,
     texture_limit: u32,
     update_only: bool,
+    timer_channel: std::sync::mpsc::Sender<std::time::Duration>,
 ) {
     std::thread::spawn(move || {
         let mut timer = std::time::Instant::now();
         let sim_time = 1.0 / 60.0;
         let mut sim_time_timer = std::time::Instant::now();
         while !exit_flag.load(std::sync::atomic::Ordering::Relaxed) {
-            let mut locked = simulator.lock();
+            let mut locked = simulator.write();
             if timer.elapsed().as_secs_f32() >= spawn_time
                 && locked.things.len() < texture_limit as usize
                 && !update_only
@@ -535,6 +642,7 @@ fn spawn_thingy_spawner(
             if sim_time_timer.elapsed().as_secs_f32() >= sim_time {
                 sim_time_timer = std::time::Instant::now();
                 locked.update();
+                timer_channel.send(sim_time_timer.elapsed()).unwrap();
             }
         }
     });
@@ -553,10 +661,10 @@ pub fn random_velocity() -> (f32, f32) {
 }
 
 fn number(b: std::time::Duration) -> String {
-    let mut text = "Frame Time: ".to_string();
+    let mut text = "".to_string();
     if b.as_secs_f64() >= 0.3 {
         text += &format!("{}s", b.as_secs());
-    } else if b.as_millis() > 3 { // 3 ms is the minimum
+    } else if b.as_millis() > 2 {
         text += &format!("{}ms", b.as_millis());
     } else if b.as_micros() != 0 {
         text += &format!("{}us", b.as_micros());
