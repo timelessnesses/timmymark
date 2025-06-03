@@ -1,9 +1,10 @@
-use std::sync::{atomic::AtomicBool, Arc, LazyLock, RwLock};
-use rand::Rng;
+use std::sync::{Arc, atomic::AtomicBool};
 
 use clap::Parser;
-use rand::SeedableRng;
 use sdl2::{self, image::LoadTexture};
+
+mod ffmpeg;
+
 #[derive(clap::Parser)]
 #[command(author = "timelessnesses", about = "SDL2 (Rust) Bunnymark")]
 pub struct Cli {
@@ -23,8 +24,8 @@ pub struct Cli {
     #[arg(long, default_value_t = 720)]
     pub height: u32,
 
-    /// Texture limit number (default: 10000)
-    #[arg(long, default_value_t = 10000)]
+    /// Texture limit number (default: 50000)
+    #[arg(long, default_value_t = 50000)]
     pub texture_limit: u32,
 
     /// Custom 2D texture folder (default: None (program's included textures))
@@ -39,9 +40,47 @@ pub struct Cli {
     #[arg(long, default_value_t = 0, conflicts_with = "texture_width")]
     pub texture_height: u32,
 
-    /// Texture time to spawn (default: 0.01 seconds)
-    #[arg(long, default_value_t = 0.01)]
+    /// Texture time to spawn (default: 0.001 seconds)
+    #[arg(long, default_value_t = 0.001)]
     pub texture_spawn_time: f32,
+
+    /// Spawn textures by mouse clicks instead of time (default: false)
+    #[arg(long, default_value_t = false)]
+    pub spawn_by_click: bool,
+
+    /// Mouse click spawn amount (left click: 100, right click: 10)
+    #[arg(long, default_value_t = ClickRange(100, 10), value_parser = convert_mouse_click_string_to_left_right)]
+    pub mouse_click_spawn_amount: ClickRange,
+
+    #[arg(long, default_value_t = false)]
+    pub record: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ClickRange(u32, u32);
+
+impl std::fmt::Display for ClickRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{},{}", self.0, self.1)
+    }
+}
+
+fn convert_mouse_click_string_to_left_right(s: &str) -> Result<ClickRange, String> {
+    let mut split = s.split(',');
+    if split.clone().count() != 2 {
+        return Err("Mouse click spawn amount must be in format of '100,10'".to_string());
+    }
+    let left = split
+        .next()
+        .unwrap()
+        .parse::<u32>()
+        .map_err(|_| "Mouse click spawn amount must be a positive number".to_string())?;
+    let right = split
+        .next()
+        .unwrap()
+        .parse::<u32>()
+        .map_err(|_| "Mouse click spawn amount must be a positive number".to_string())?;
+    Ok(ClickRange(left, right))
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -58,12 +97,16 @@ struct Simulator {
 }
 
 impl Simulator {
-    fn new(max_x: f32, max_y: f32) -> Self {
+    fn with_limit(max_x: f32, max_y: f32, capacity: usize) -> Self {
         Self {
-            things: Vec::new(),
+            things: Vec::with_capacity(capacity),
             max_x,
             max_y,
         }
+    }
+
+    fn new(max_x: f32, max_y: f32) -> Self {
+        Self::with_limit(max_x, max_y, 1000)
     }
 
     fn add_thing(&mut self, velocity: (f32, f32), position: (f32, f32), texture_index: usize) {
@@ -76,6 +119,7 @@ impl Simulator {
 
     fn update(&mut self) {
         for thing in self.things.iter_mut() {
+            thing.velocity.1 += 0.5; // gravity :3
             if (thing.position.0 + thing.velocity.0) > self.max_x {
                 thing.velocity.0 *= -1.0;
                 thing.position.0 = self.max_x;
@@ -106,6 +150,8 @@ const DEFAULT_TEXTURE: &[u8] = include_bytes!("../dumb_idiot.png");
 
 const ROBOTO: &[u8] = include_bytes!("./assets/Roboto-Light.ttf");
 
+const TARGET_VIDEO_FRAMERATE: u32 = 60;
+
 fn main() {
     better_panic::Settings::new()
         .lineno_suffix(true)
@@ -114,7 +160,7 @@ fn main() {
     let cli = Cli::parse();
     if cli.list_gpu_renderers {
         println!("Available GPU renderers:");
-        if let Some((i, r)) = sdl2::render::drivers().enumerate().next() {
+        sdl2::render::drivers().enumerate().for_each(|(i, r)| {
             let mut flags = vec![];
             if r.flags & 0x00000001 != 0 {
                 flags.push("Software Fallback");
@@ -134,14 +180,19 @@ fn main() {
             println!("  Max Texture Height: {}", r.max_texture_height);
             println!("  Rendering Capability: {}", flags.join(", "));
             println!();
-            return;
-        }
+        });
+        return
     }
 
     let ctx = sdl2::init().unwrap();
     let video = ctx.video().unwrap();
     let _image = sdl2::image::init(sdl2::image::InitFlag::all()).unwrap();
     let font_ctx = sdl2::ttf::init().unwrap();
+
+    let mut ffmpeg = None;
+    if cli.record {
+        ffmpeg = Some(ffmpeg::VideoRecorder::new("out.mp4", cli.width, cli.height, TARGET_VIDEO_FRAMERATE));
+    }
 
     let window = video
         .window(
@@ -244,7 +295,7 @@ fn main() {
     let max_x = cli.width as f32 - textures[0].1.0;
     let max_y = cli.height as f32 - textures[0].1.1;
 
-    let simulator = Arc::new(RwLock::new(Simulator::new(max_x, max_y)));
+    let simulator = Arc::new(parking_lot::Mutex::new(Simulator::new(max_x, max_y)));
 
     let fps_font = font_ctx
         .load_font_from_rwops(sdl2::rwops::RWops::from_bytes(ROBOTO).unwrap(), 13)
@@ -252,9 +303,18 @@ fn main() {
 
     let exit_flag = Arc::new(AtomicBool::new(false));
 
-    spawn_thingy_spawner(simulator.clone(), exit_flag.clone(), cli.texture_spawn_time, textures.len(), cli.texture_limit);
+    spawn_thingy_spawner(
+        simulator.clone(),
+        exit_flag.clone(),
+        cli.texture_spawn_time,
+        textures.len(),
+        cli.texture_limit,
+        cli.spawn_by_click,
+    );
 
+    #[cfg(debug_assertions)]
     let mut current_mouse_x = 0.0;
+    #[cfg(debug_assertions)]
     let mut current_mouse_y = 0.0;
 
     'main_loop: loop {
@@ -264,16 +324,38 @@ fn main() {
                 sdl2::event::Event::Quit { .. } => {
                     exit_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                     break 'main_loop;
-                },
+                }
+                #[cfg(debug_assertions)]
                 sdl2::event::Event::MouseMotion { x, y, .. } => {
                     current_mouse_x = x as f32;
                     current_mouse_y = y as f32;
                 }
-                _ => { }
+                sdl2::event::Event::MouseButtonDown {
+                    mouse_btn, x, y, ..
+                } => {
+                    let spawn_amount = if mouse_btn == sdl2::mouse::MouseButton::Left {
+                        cli.mouse_click_spawn_amount.0
+                    } else {
+                        cli.mouse_click_spawn_amount.1
+                    };
+                    let pos = (
+                        x as f32 - textures[0].1.0 / 2.0,
+                        y as f32 - textures[0].1.1 / 2.0,
+                    );
+                    for _ in 0..spawn_amount {
+                        let i = if textures.len() > 1 {
+                            rand::random_range(0..textures.len() - 1)
+                        } else {
+                            0
+                        };
+                        simulator.lock().add_thing(random_velocity(), pos, i);
+                    }
+                }
+                _ => {}
             }
         }
         canvas.clear();
-        for thing in simulator.read().unwrap().things.iter() {
+        for thing in simulator.lock().things.iter() {
             let texture = &textures[thing.texture_index];
             let (texture_width, texture_height) = texture.1;
             let (texture_x, texture_y) = thing.position;
@@ -306,14 +388,11 @@ fn main() {
             .shaded(sdl2::pixels::Color::WHITE, sdl2::pixels::Color::BLACK)
             .unwrap();
         let added_render_latency_text = fps_font
-            .render(&format!(
-                "Render Latency: {}ns (nanoseconds!)",
-                frame_time.elapsed().as_nanos()
-            ))
+            .render(&number(frame_time.elapsed()))
             .shaded(sdl2::pixels::Color::WHITE, sdl2::pixels::Color::BLACK)
             .unwrap();
         let thingy_count = fps_font
-            .render(&format!("Thingy Count: {}", simulator.read().unwrap().things.len()))
+            .render(&format!("Thingy Count: {}", simulator.lock().things.len()))
             .shaded(sdl2::pixels::Color::WHITE, sdl2::pixels::Color::BLACK)
             .unwrap();
         canvas
@@ -394,7 +473,14 @@ fn main() {
         #[cfg(debug_assertions)]
         {
             canvas.set_draw_color(sdl2::pixels::Color::CYAN);
-            canvas.fill_rect(sdl2::rect::Rect::new(current_mouse_x as i32, current_mouse_y as i32, 100, 100)).unwrap();
+            canvas
+                .fill_rect(sdl2::rect::Rect::new(
+                    current_mouse_x as i32,
+                    current_mouse_y as i32,
+                    100,
+                    100,
+                ))
+                .unwrap();
             canvas.set_draw_color(sdl2::pixels::Color::BLACK);
         }
         canvas.present();
@@ -419,29 +505,32 @@ fn main() {
     }
 }
 
-fn spawn_thingy_spawner(simulator: Arc<RwLock<Simulator>>, exit_flag: Arc<AtomicBool>, spawn_time: f32, texture_counts: usize, texture_limit: u32) {
+fn spawn_thingy_spawner(
+    simulator: Arc<parking_lot::Mutex<Simulator>>,
+    exit_flag: Arc<AtomicBool>,
+    spawn_time: f32,
+    texture_counts: usize,
+    texture_limit: u32,
+    update_only: bool,
+) {
     std::thread::spawn(move || {
         let mut timer = std::time::Instant::now();
-        let sim_time = 1.0/120.0;
+        let sim_time = 1.0 / 60.0;
         let mut sim_time_timer = std::time::Instant::now();
         while !exit_flag.load(std::sync::atomic::Ordering::Relaxed) {
-            let mut locked = simulator.write().unwrap();
-            if timer.elapsed().as_secs_f32() >= spawn_time && locked.things.len() < texture_limit as usize {
+            let mut locked = simulator.lock();
+            if timer.elapsed().as_secs_f32() >= spawn_time
+                && locked.things.len() < texture_limit as usize
+                && !update_only
+            {
                 timer = std::time::Instant::now();
-                let pos = ((locked.max_x / 2.0) as f32, (locked.max_y / 2.0) as f32);
+                let pos = ((locked.max_x / 2.0), (locked.max_y / 2.0));
                 let i = if texture_counts > 1 {
-                        rand::random_range(0..texture_counts - 1)
-                    } else {
-                        0
-                    };
-                locked.add_thing(
-                    (
-                        rand::random_range(0.0..1.0) * 8.0,
-                        (rand::random_range(0.0..1.0) * 5.0) - 2.5,
-                    ),
-                    pos,
-                    i,
-                );
+                    rand::random_range(0..texture_counts - 1)
+                } else {
+                    0
+                };
+                locked.add_thing(random_velocity(), pos, i);
             }
             if sim_time_timer.elapsed().as_secs_f32() >= sim_time {
                 sim_time_timer = std::time::Instant::now();
@@ -454,4 +543,25 @@ fn spawn_thingy_spawner(simulator: Arc<RwLock<Simulator>>, exit_flag: Arc<Atomic
 /// Truncate float with [`precision`] as how many digits you needed in final result
 pub fn truncate(b: f64, precision: usize) -> f64 {
     f64::trunc(b * ((10 * precision) as f64)) / ((10 * precision) as f64)
+}
+
+pub fn random_velocity() -> (f32, f32) {
+    (
+        rand::random_range(-1.0..1.0) * 8.0,
+        (rand::random_range(-1.0..1.0) * 5.0) - 2.5,
+    )
+}
+
+fn number(b: std::time::Duration) -> String {
+    let mut text = "Frame Time: ".to_string();
+    if b.as_secs_f64() >= 0.3 {
+        text += &format!("{}s", b.as_secs());
+    } else if b.as_millis() > 3 { // 3 ms is the minimum
+        text += &format!("{}ms", b.as_millis());
+    } else if b.as_micros() != 0 {
+        text += &format!("{}us", b.as_micros());
+    } else {
+        text += &format!("{}ns", b.as_nanos());
+    }
+    text
 }

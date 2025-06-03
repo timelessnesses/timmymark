@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 better-panic = "0.3.0"
+parking_lot = "0.12.4"
 rand = "0.9.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
